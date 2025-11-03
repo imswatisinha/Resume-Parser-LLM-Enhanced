@@ -108,7 +108,7 @@ class OllamaParser:
             model = self.available_models[0]
         
         prompt = f"""
-        You are an expert resume parser. Extract the following information from this resume and return ONLY a valid JSON object:
+        You are an expert resume parser. Extract the following information from this resume and return ONLY a valid JSON object with this EXACT structure:
 
         {{
             "personal_info": {{
@@ -119,14 +119,15 @@ class OllamaParser:
                 "linkedin": "LinkedIn URL if mentioned",
                 "github": "GitHub URL if mentioned"
             }},
-            "summary": "Professional summary in 2-3 sentences",
+            "summary": "Professional summary in 2-3 sentences or null if not available",
             "experience": [
                 {{
-                    "company": "Company name",
-                    "position": "Job title", 
-                    "duration": "Start - End dates",
-                    "responsibilities": ["Key responsibility 1", "Key responsibility 2"],
-                    "achievements": ["Achievement 1", "Achievement 2"]
+                    "title": "Job title/position name",
+                    "company_name": "Company name",
+                    "location": "Work location (city, state/country)",
+                    "start_time": "Start date (format: MMM YYYY like 'Dec 2017')",
+                    "end_time": "End date (format: MMM YYYY or 'present')",
+                    "summary": "Brief description of role and key achievements"
                 }}
             ],
             "education": [
@@ -134,27 +135,50 @@ class OllamaParser:
                     "institution": "School/University name",
                     "degree": "Degree type and field",
                     "year": "Graduation year",
+                    "location": "Institution location",
                     "gpa": "GPA if mentioned"
                 }}
             ],
             "skills": {{
                 "technical": ["Technical skill 1", "Technical skill 2"],
                 "soft": ["Soft skill 1", "Soft skill 2"],
-                "languages": ["Programming language 1", "Programming language 2"],
-                "tools": ["Tool 1", "Tool 2"]
+                "programming_languages": ["Programming language 1", "Programming language 2"],
+                "tools_and_technologies": ["Tool 1", "Tool 2", "Framework 1"],
+                "domains": ["Domain expertise 1", "Domain expertise 2"]
             }},
             "projects": [
                 {{
                     "name": "Project name",
                     "description": "Brief description",
                     "technologies": ["Tech 1", "Tech 2"],
-                    "url": "Project URL if mentioned"
+                    "url": "Project URL if mentioned",
+                    "duration": "Project duration if mentioned"
                 }}
             ],
-            "certifications": ["Certification 1", "Certification 2"],
+            "certifications": [
+                {{
+                    "name": "Certification name",
+                    "issuer": "Issuing organization",
+                    "date": "Issue date",
+                    "url": "Certification URL if available"
+                }}
+            ],
             "achievements": ["Achievement 1", "Achievement 2"],
-            "languages": ["Language 1", "Language 2"]
+            "languages": ["Language 1", "Language 2"],
+            "keywords_extracted": [
+                "keyword1", "keyword2", "technology1", "skill1", "domain1"
+            ],
+            "classification_tags": [
+                "technology", "software", "data_science", "AI", "backend", "frontend", "mobile", "devops", "hr", "finance", "marketing", "sales"
+            ]
         }}
+
+        IMPORTANT INSTRUCTIONS:
+        1. For experience section, use the EXACT field names: title, company_name, location, start_time, end_time, summary
+        2. Extract ALL relevant keywords from the resume into keywords_extracted array - include job titles, technologies, skills, tools, companies, domains
+        3. For classification_tags, analyze the resume and include relevant categories from: technology, software, data_science, AI, machine_learning, backend, frontend, mobile, devops, cloud, database, hr, finance, marketing, sales, operations, consulting, research, academic
+        4. summary field should contain the professional summary if found, otherwise set to null
+        5. Make sure all dates are in format "MMM YYYY" (e.g., "Dec 2017", "Jan 2020") or "present"
 
         Resume text:
         {resume_text}
@@ -163,7 +187,17 @@ class OllamaParser:
         """
         
         try:
-            st.write(f"🦙 Processing with Ollama model: {model}")
+            # Show progress and model being used
+            progress_container = st.empty()
+            progress_container.info(f"🦙 Processing with Ollama model: {model}")
+            
+            # Show timeout warning for large documents
+            if len(resume_text) > 5000:
+                st.warning("⏱️ Large document detected. Processing may take 2-3 minutes...")
+            
+            # Use a progress bar to show activity
+            progress_bar = st.progress(0)
+            progress_bar.progress(0.1, "Starting AI processing...")
             
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -174,12 +208,16 @@ class OllamaParser:
                     "options": {
                         "temperature": 0.1,  # Low temperature for consistent output
                         "top_p": 0.9,
-                        "num_ctx": 4096,  # Context length
+                        "num_ctx": 8192,  # Increased context length for large documents
                         "stop": ["Human:", "Assistant:"]
                     }
                 },
-                timeout=180  # 3 minutes timeout
+                timeout=300  # Increased to 5 minutes for large documents
             )
+            
+            progress_bar.progress(1.0, "AI processing complete!")
+            progress_container.empty()
+            progress_bar.empty()
             
             if response.status_code == 200:
                 result = response.json()
@@ -222,8 +260,25 @@ class OllamaParser:
                 }
                 
         except requests.exceptions.Timeout:
+            # Clear progress indicators
+            if 'progress_bar' in locals():
+                progress_bar.empty()
+            if 'progress_container' in locals():
+                progress_container.empty()
+                
             return {
-                "error": "Request timed out. The model might be processing a large resume.",
+                "error": "⏰ Processing timed out after 5 minutes. This can happen with very large documents or complex resumes.",
+                "suggestions": [
+                    "Try a smaller/simpler document first to test the system",
+                    "Use a faster model like 'phi3:mini' or 'gemma2:2b'", 
+                    "Check if Ollama is running properly: run 'ollama list' in terminal",
+                    "Make sure your system has enough memory for the model"
+                ],
+                "troubleshooting": {
+                    "document_size": f"{len(resume_text)} characters",
+                    "model_used": model,
+                    "timeout_duration": "300 seconds (5 minutes)"
+                },
                 "_source": "ollama"
             }
         except Exception as e:
@@ -231,6 +286,99 @@ class OllamaParser:
                 "error": f"Unexpected error: {str(e)}",
                 "_source": "ollama"
             }
+    
+    def parse_resume_with_fallback(self, resume_text: str, preferred_model: str = None) -> Dict[str, Any]:
+        """
+        Parse resume with automatic fallback to smaller models if memory errors occur.
+        
+        Args:
+            resume_text (str): Resume text to parse
+            preferred_model (str): Preferred model to try first
+            
+        Returns:
+            dict: Parsing result or error with fallback attempts
+        """
+        
+        if not self.available_models:
+            return {
+                "error": "No Ollama models available. Please install a model first.",
+                "setup_required": True
+            }
+        
+        # Order models by memory safety (safest first)
+        model_safety_order = ["gemma2:2b", "llama3.2:1b", "phi3:mini", "llama3.2:3b", "mistral:7b", "llama3.1:8b"]
+        
+        # Create ordered list of models to try
+        models_to_try = []
+        
+        # Add preferred model first if specified and available
+        if preferred_model and preferred_model in self.available_models:
+            models_to_try.append(preferred_model)
+        
+        # Add other models in safety order
+        for safe_model in model_safety_order:
+            if safe_model in self.available_models and safe_model not in models_to_try:
+                models_to_try.append(safe_model)
+        
+        # Add any remaining models
+        for model in self.available_models:
+            if model not in models_to_try:
+                models_to_try.append(model)
+        
+        last_error = None
+        attempts = []
+        
+        for attempt, model in enumerate(models_to_try, 1):
+            st.info(f"🔄 Attempt {attempt}: Trying model '{model}'...")
+            
+            try:
+                result = self.parse_resume(resume_text, model)
+                
+                # Check if parsing was successful
+                if "error" not in result:
+                    if attempts:
+                        st.success(f"✅ Successfully parsed with '{model}' after {attempt} attempts")
+                    return result
+                
+                # Check for memory-related errors
+                error_msg = result.get("error", "").lower()
+                if any(keyword in error_msg for keyword in ["memory", "gpu", "system", "load", "500"]):
+                    attempts.append({
+                        "model": model,
+                        "error": "Memory/GPU error",
+                        "attempt": attempt
+                    })
+                    last_error = result
+                    st.warning(f"⚠️ Model '{model}' failed due to memory constraints, trying smaller model...")
+                    continue
+                else:
+                    # Non-memory error, return immediately
+                    return result
+                    
+            except Exception as e:
+                attempts.append({
+                    "model": model,
+                    "error": str(e),
+                    "attempt": attempt
+                })
+                last_error = {"error": str(e), "_source": "ollama"}
+                st.warning(f"⚠️ Model '{model}' failed: {str(e)}")
+        
+        # If we get here, all models failed
+        return {
+            "error": "❌ All available models failed to process the document",
+            "last_error": last_error,
+            "attempts": attempts,
+            "suggestions": [
+                "Your system may need more RAM to run these models",
+                "Try installing a smaller model: ollama pull gemma2:2b",
+                "Close other applications to free up memory",
+                "Restart Ollama service: ollama serve",
+                "Consider splitting large documents into smaller sections"
+            ],
+            "available_models": self.available_models,
+            "_source": "ollama"
+        }
     
     def generate_insights(self, resume_text: str, model: str = None) -> Dict[str, Any]:
         """Generate insights about the resume."""
@@ -290,6 +438,84 @@ class OllamaParser:
         except Exception as e:
             return {"error": f"Failed to generate insights: {str(e)}", "_source": "ollama"}
 
+    def ask_question(self, question: str, context: str = "", max_tokens: int = 500) -> Dict[str, Any]:
+        """
+        Ask a question to Ollama with improved timeout handling.
+        
+        Args:
+            question (str): The question to ask
+            context (str): Additional context for the question
+            max_tokens (int): Maximum tokens for response
+            
+        Returns:
+            dict: Response with answer or error information
+        """
+        if not self.is_connected:
+            return {"error": "Ollama is not connected"}
+        
+        if not self.selected_model:
+            return {"error": "No model selected"}
+        
+        # Create context-aware prompt
+        if context:
+            prompt = f"""Context: {context}
+
+Question: {question}
+
+Please provide a clear, concise answer based on the context above."""
+        else:
+            prompt = question
+        
+        try:
+            # Increased timeout and better error handling
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.selected_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "max_tokens": max_tokens,
+                        "top_p": 0.9
+                    }
+                },
+                timeout=180  # Increased to 3 minutes
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                answer = result.get('response', '').strip()
+                
+                return {
+                    "answer": answer,
+                    "model_used": self.selected_model,
+                    "tokens_used": len(answer.split()),
+                    "success": True
+                }
+            else:
+                return {
+                    "error": f"Ollama API error: {response.status_code} - {response.text}",
+                    "success": False
+                }
+                
+        except requests.exceptions.Timeout:
+            return {
+                "error": "Request timed out. The question might be too complex or the document too large. Try asking a more specific question.",
+                "suggestion": "Break down complex questions into simpler parts, or try asking about specific sections of the document.",
+                "success": False
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "error": "Cannot connect to Ollama. Please make sure Ollama is running on localhost:11434",
+                "success": False
+            }
+        except Exception as e:
+            return {
+                "error": f"Failed to get answer from Ollama: {str(e)}",
+                "success": False
+            }
+    
 def create_ollama_setup_guide():
     """Create Ollama setup guide in Streamlit."""
     

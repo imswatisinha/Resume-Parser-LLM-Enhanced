@@ -26,11 +26,13 @@ class OllamaRAGRetriever:
     def __init__(self, ollama_base_url: str = "http://localhost:11434"):
         self.ollama_url = ollama_base_url
         self.chunks = []
+        self.chunk_objects = []  # Store structured chunk objects
         self.embeddings = None
         self.vectorizer = None
         self.embedding_model = None
         self.available_models = []
         self.selected_model = None
+        self.chunk_metadata = []  # Store metadata for each chunk
         self.setup_embedding_model()
         self.check_ollama_connection()
     
@@ -136,6 +138,49 @@ class OllamaRAGRetriever:
             st.error(f"Failed to setup RAG: {str(e)}")
             return False
     
+    def setup_rag_with_chunks(self, chunk_objects: List[Dict[str, Any]]) -> bool:
+        """
+        Set up RAG system with pre-processed chunk objects.
+        
+        Args:
+            chunk_objects (List[Dict]): List of chunk objects with 'content', 'type', etc.
+            
+        Returns:
+            bool: True if setup successful, False otherwise
+        """
+        try:
+            self.chunk_objects = chunk_objects
+            self.chunks = [chunk['content'] for chunk in chunk_objects]
+            self.chunk_metadata = [
+                {
+                    'type': chunk.get('type', 'text'),
+                    'page': chunk.get('page', 1),
+                    'section': chunk.get('section', 'unknown'),
+                    'length': len(chunk['content'])
+                }
+                for chunk in chunk_objects
+            ]
+            
+            if not self.chunks:
+                st.error("No text chunks provided")
+                return False
+            
+            # Create embeddings for all chunks
+            self.embeddings = self.create_embeddings(self.chunks)
+            
+            # Calculate chunk statistics
+            total_chars = sum(len(chunk) for chunk in self.chunks)
+            avg_length = total_chars // len(self.chunks) if self.chunks else 0
+            
+            st.success(f"✅ Enhanced RAG setup complete: {len(self.chunks)} chunks, "
+                      f"avg length: {avg_length} chars, method: {self.embedding_method}")
+            
+            return True
+            
+        except Exception as e:
+            st.error(f"Failed to setup enhanced RAG: {str(e)}")
+            return False
+    
     def calculate_similarity(self, query_embedding: np.ndarray, doc_embeddings: np.ndarray) -> np.ndarray:
         """Calculate similarity between query and document embeddings."""
         if SKLEARN_AVAILABLE:
@@ -156,8 +201,8 @@ class OllamaRAGRetriever:
             
             return np.array(similarities)
     
-    def retrieve_relevant_chunks(self, query: str, top_k: int = 3) -> List[str]:
-        """Retrieve most relevant text chunks for a query."""
+    def retrieve_relevant_chunks(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Retrieve most relevant text chunks for a query with metadata."""
         if not self.chunks or self.embeddings is None:
             return []
         
@@ -172,22 +217,71 @@ class OllamaRAGRetriever:
                 similarities = self.calculate_similarity(query_embedding, self.embeddings)
             
             else:
-                # Simple keyword matching fallback
+                # Enhanced keyword matching with section weighting
                 query_words = set(query.lower().split())
                 similarities = []
-                for chunk in self.chunks:
+                for i, chunk in enumerate(self.chunks):
                     chunk_words = set(chunk.lower().split())
                     overlap = len(query_words & chunk_words)
-                    similarities.append(overlap / max(len(query_words), 1))
+                    base_score = overlap / max(len(query_words), 1)
+                    
+                    # Boost score based on chunk type/section if available
+                    if self.chunk_metadata and i < len(self.chunk_metadata):
+                        metadata = self.chunk_metadata[i]
+                        section_type = metadata.get('type', '').lower()
+                        
+                        # Boost relevant sections for specific query types
+                        if any(skill_word in query.lower() for skill_word in ['skill', 'technology', 'programming']):
+                            if 'skill' in section_type:
+                                base_score *= 1.5
+                        elif any(exp_word in query.lower() for exp_word in ['experience', 'work', 'job']):
+                            if 'experience' in section_type or 'work' in section_type:
+                                base_score *= 1.5
+                        elif any(edu_word in query.lower() for edu_word in ['education', 'degree', 'university']):
+                            if 'education' in section_type:
+                                base_score *= 1.5
+                    
+                    similarities.append(base_score)
                 similarities = np.array(similarities)
             
-            # Get top-k most similar chunks
+            # Get top-k most similar chunks with their metadata
             top_indices = np.argsort(similarities)[-top_k:][::-1]
-            return [self.chunks[i] for i in top_indices if similarities[i] > 0.1]
+            
+            relevant_chunks = []
+            for idx in top_indices:
+                if similarities[idx] > 0.05:  # Lower threshold for better recall
+                    chunk_data = {
+                        'content': self.chunks[idx],
+                        'similarity_score': float(similarities[idx]),
+                        'chunk_index': idx
+                    }
+                    
+                    # Add metadata if available
+                    if self.chunk_metadata and idx < len(self.chunk_metadata):
+                        chunk_data.update(self.chunk_metadata[idx])
+                    
+                    # Add chunk object data if available
+                    if self.chunk_objects and idx < len(self.chunk_objects):
+                        original_chunk = self.chunk_objects[idx]
+                        chunk_data['original_type'] = original_chunk.get('type', 'text')
+                        chunk_data['source_page'] = original_chunk.get('page', 1)
+                    
+                    relevant_chunks.append(chunk_data)
+            
+            return relevant_chunks
             
         except Exception as e:
             st.warning(f"Retrieval failed: {str(e)}")
-            return self.chunks[:top_k]  # Fallback to first few chunks
+            # Fallback: return first few chunks with basic structure
+            return [
+                {
+                    'content': self.chunks[i],
+                    'similarity_score': 0.5,
+                    'chunk_index': i,
+                    'type': 'fallback'
+                }
+                for i in range(min(top_k, len(self.chunks)))
+            ]
     
     def ask_ollama_question(self, question: str, context: str, model: str = None) -> Dict[str, Any]:
         """Ask question to Ollama with context."""
@@ -239,10 +333,10 @@ class OllamaRAGRetriever:
     
     def ask_question(self, question: str) -> Dict[str, Any]:
         """
-        Ask a question about the resume using local RAG.
+        Ask a question about the document using local RAG.
         
         Args:
-            question (str): Question about the resume
+            question (str): Question about the document
             
         Returns:
             dict: Answer and source information
@@ -258,17 +352,45 @@ class OllamaRAGRetriever:
             relevant_chunks = self.retrieve_relevant_chunks(question, top_k=3)
             
             if not relevant_chunks:
-                return {"error": "No relevant information found in the resume."}
+                return {"error": "No relevant information found in the document."}
             
-            # Combine chunks as context
-            context = "\n\n".join(relevant_chunks)
+            # Combine chunks as context with metadata
+            context_parts = []
+            chunk_sources = []
+            
+            for i, chunk_data in enumerate(relevant_chunks):
+                content = chunk_data['content']
+                metadata = []
+                
+                if chunk_data.get('type'):
+                    metadata.append(f"Section: {chunk_data['type']}")
+                if chunk_data.get('page'):
+                    metadata.append(f"Page: {chunk_data['page']}")
+                if chunk_data.get('similarity_score'):
+                    metadata.append(f"Relevance: {chunk_data['similarity_score']:.2f}")
+                
+                chunk_header = f"[Chunk {i+1}" + (f" - {', '.join(metadata)}" if metadata else "") + "]"
+                context_parts.append(f"{chunk_header}\n{content}")
+                
+                # Store source info
+                chunk_sources.append({
+                    'content': content[:200] + "..." if len(content) > 200 else content,
+                    'type': chunk_data.get('type', 'unknown'),
+                    'page': chunk_data.get('page', 1),
+                    'similarity_score': chunk_data.get('similarity_score', 0),
+                    'chunk_index': chunk_data.get('chunk_index', i)
+                })
+            
+            context = "\n\n".join(context_parts)
             
             # Ask Ollama
             result = self.ask_ollama_question(question, context, self.selected_model)
             
             if "error" not in result:
-                result["sources"] = relevant_chunks
+                result["sources"] = chunk_sources
                 result["retrieval_method"] = self.embedding_method
+                result["total_chunks_used"] = len(relevant_chunks)
+                result["context_length"] = len(context)
             
             return result
             
@@ -325,6 +447,28 @@ class OllamaRAGRetriever:
         
         return insights
     
+    def answer_question(self, question: str, context: str = None) -> str:
+        """
+        Simple interface for answering questions - compatible with app.py
+        
+        Args:
+            question (str): The question to answer
+            context (str): Optional context (if not provided, uses RAG retrieval)
+            
+        Returns:
+            str: The answer text
+        """
+        if context:
+            # Use provided context directly
+            result = self.ask_ollama_question(question, context, self.selected_model)
+            return result.get("answer", "Could not generate answer")
+        else:
+            # Use RAG system
+            result = self.ask_question(question)
+            if "error" in result:
+                return f"Error: {result['error']}"
+            return result.get("answer", "Could not generate answer")
+    
     def get_available_models(self) -> List[str]:
         """Get list of available Ollama models."""
         self.check_ollama_connection()
@@ -338,7 +482,7 @@ class OllamaRAGRetriever:
         return False
 
 # Helper functions for Streamlit integration
-def create_ollama_rag_interface(resume_text: str):
+def create_ollama_rag_interface(document_text: str = None, chunk_objects: List[Dict[str, Any]] = None):
     """Create Ollama RAG interface in Streamlit sidebar."""
     st.sidebar.header("🤖 Local AI Q&A System")
     
@@ -379,7 +523,21 @@ def create_ollama_rag_interface(resume_text: str):
     # Setup RAG button
     if st.sidebar.button("🔧 Initialize Local Q&A System"):
         with st.spinner("Setting up local AI Q&A system..."):
-            if rag.setup_rag(resume_text):
+            setup_success = False
+            
+            if chunk_objects:
+                # Use structured chunks if available
+                setup_success = rag.setup_rag_with_chunks(chunk_objects)
+                st.sidebar.info("Using structured document chunks")
+            elif document_text:
+                # Fall back to text-based setup
+                setup_success = rag.setup_rag(document_text)
+                st.sidebar.info("Using text-based chunking")
+            else:
+                st.sidebar.error("No document data provided")
+                return False
+                
+            if setup_success:
                 st.session_state.rag_ready = True
                 st.sidebar.success("✅ Local Q&A system ready!")
             else:
@@ -437,10 +595,18 @@ def create_ollama_rag_interface(resume_text: str):
         # Generate comprehensive insights
         if st.sidebar.button("🧠 Generate Complete Analysis"):
             with st.spinner("Generating comprehensive insights..."):
-                insights = rag.get_resume_insights(resume_text)
-                st.session_state.resume_insights = insights
-                if "error" not in insights:
-                    st.sidebar.success("✅ Complete analysis generated!")
+                # Use document text or reconstruct from chunks
+                text_for_insights = document_text
+                if not text_for_insights and chunk_objects:
+                    text_for_insights = "\n\n".join([chunk['content'] for chunk in chunk_objects])
+                
+                if text_for_insights:
+                    insights = rag.get_resume_insights(text_for_insights)
+                    st.session_state.resume_insights = insights
+                    if "error" not in insights:
+                        st.sidebar.success("✅ Complete analysis generated!")
+                else:
+                    st.sidebar.error("No text available for analysis")
     
     return st.session_state.get('rag_ready', False)
 
