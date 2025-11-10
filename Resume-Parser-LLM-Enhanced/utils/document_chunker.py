@@ -39,15 +39,16 @@ class DocumentChunker:
         """
         chunks = []
         
-        # Define section patterns
+        # Define section patterns - more precise to avoid merging
         section_patterns = {
-            'personal_info': r'(?i)(name|contact|phone|email|address)[\s:]*([^\n]+)',
-            'objective': r'(?i)(objective|summary|profile)[\s:]*\n((?:.*\n?)*?)(?=\n\s*[A-Z]|\n\s*$)',
-            'education': r'(?i)(education|academic|qualification)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|work|skill|project|certification)|$)',
-            'experience': r'(?i)(experience|employment|work|career)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:education|skill|project|certification)|$)',
-            'skills': r'(?i)(skills?|technologies?|competenc|proficienc)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|project|certification)|$)',
-            'projects': r'(?i)(projects?|portfolio)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|skill|certification)|$)',
-            'certifications': r'(?i)(certification|certificate|license)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|skill|project)|$)'
+            'personal_info': r'(?i)^(?:name|contact|phone|email|address|linkedin|portfolio|github)[\s:]*([^\n]+)',
+            'objective': r'(?i)^(?:professional\s+)?(?:summary|objective|profile)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|work|skill|project|certification|achievement|$)|\n\s*[A-Z][^:]*:)',
+            'education': r'(?i)^(?:education|academic|qualification)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|work|skill|project|certification|achievement|technical|professional|$)|\n\s*[A-Z][^:]*:)',
+            'experience': r'(?i)^(?:professional\s+)?(?:experience|employment|work|career)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:education|skill|project|certification|achievement|technical|$)|\n\s*[A-Z][^:]*:)',
+            'skills': r'(?i)^(?:technical\s+)?(?:skills?|technologies?|competenc|proficienc)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|project|certification|achievement|$)|\n\s*[A-Z][^:]*:)',
+            'projects': r'(?i)^(?:projects?|portfolio)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|skill|certification|achievement|$)|\n\s*[A-Z][^:]*:)',
+            'certifications': r'(?i)^(?:certification|certificate|license)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|skill|project|achievement|$)|\n\s*[A-Z][^:]*:)',
+            'achievements': r'(?i)^(?:achievements?|awards?|honors?)[\s:]*\n((?:.*\n?)*?)(?=\n\s*(?:experience|education|skill|project|certification|$)|\n\s*[A-Z][^:]*:)'
         }
         
         for section_name, pattern in section_patterns.items():
@@ -59,12 +60,20 @@ class DocumentChunker:
                     
                     # Find page number if pages provided
                     page_num = self._find_page_number(section_text, pages) if pages else None
+                    # Heuristic start/end positions
+                    start_idx = text.find(section_text)
+                    end_idx = start_idx + len(section_text) if start_idx != -1 else None
+                    # Simple summary: first 2 sentences or 200 chars
+                    summary = self._simple_summary(section_text)
                     
                     chunk = {
                         'content': section_text,
                         'section_type': section_name,
                         'chunk_id': f"{section_name}_{len(chunks)}",
                         'page': page_num,
+                        'start_char': start_idx if start_idx != -1 else None,
+                        'end_char': end_idx,
+                        'summary': summary,
                         'metadata': {
                             'section': section_name,
                             'length': len(section_text),
@@ -104,11 +113,15 @@ class DocumentChunker:
                 # Create chunk from current content
                 page_num = self._find_page_number(current_chunk, pages) if pages else None
                 
+                summary = self._simple_summary(current_chunk)
                 chunk = {
                     'content': current_chunk.strip(),
                     'section_type': 'general',
                     'chunk_id': f"chunk_{len(chunks)}",
                     'page': page_num,
+                    'start_char': None,
+                    'end_char': None,
+                    'summary': summary,
                     'metadata': {
                         'sentence_count': len(current_sentences),
                         'length': len(current_chunk),
@@ -130,11 +143,15 @@ class DocumentChunker:
         if current_chunk.strip() and len(current_chunk.strip()) > self.min_chunk_size:
             page_num = self._find_page_number(current_chunk, pages) if pages else None
             
+            summary = self._simple_summary(current_chunk)
             chunk = {
                 'content': current_chunk.strip(),
                 'section_type': 'general',
                 'chunk_id': f"chunk_{len(chunks)}",
                 'page': page_num,
+                'start_char': None,
+                'end_char': None,
+                'summary': summary,
                 'metadata': {
                     'sentence_count': len(current_sentences),
                     'length': len(current_chunk),
@@ -159,11 +176,15 @@ class DocumentChunker:
         
         for page_num, page_text in enumerate(pages, 1):
             if len(page_text.strip()) > self.min_chunk_size:
+                summary = self._simple_summary(page_text)
                 chunk = {
                     'content': page_text.strip(),
                     'section_type': 'page',
                     'chunk_id': f"page_{page_num}",
                     'page': page_num,
+                    'start_char': None,
+                    'end_char': None,
+                    'summary': summary,
                     'metadata': {
                         'page_number': page_num,
                         'length': len(page_text),
@@ -197,6 +218,14 @@ class DocumentChunker:
                 return page_num
         
         return 1  # Default to first page
+
+    def _simple_summary(self, text: str) -> str:
+        """Return a simple summary: first 2 sentences or first 200 chars."""
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        candidate = " ".join(sentences[:2]).strip()
+        if candidate:
+            return candidate[:400]
+        return text[:200]
     
     def get_chunking_stats(self, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Get statistics about the chunking process."""

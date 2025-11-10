@@ -95,7 +95,7 @@ class OllamaParser:
             return False
     
     def parse_resume(self, resume_text: str, model: str = None) -> Dict[str, Any]:
-        """Parse resume using Ollama model."""
+        """Parse resume using Ollama model. Returns raw model JSON text or error."""
         
         if not self.available_models:
             return {
@@ -286,6 +286,21 @@ class OllamaParser:
                 "error": f"Unexpected error: {str(e)}",
                 "_source": "ollama"
             }
+
+    def parse_resume_normalized(self, resume_text: str, model: str = None) -> Dict[str, Any]:
+        """Parse resume and return normalized schema for downstream use."""
+        try:
+            raw = self.parse_resume(resume_text, model)
+            from .normalizers import validate_and_normalize
+            if isinstance(raw, dict) and "error" in raw:
+                # Bubble up error; caller can fallback
+                return raw
+            provider = "ollama"
+            model_used = raw.get("_model_used") if isinstance(raw, dict) else model
+            normalized = validate_and_normalize(raw, provider=provider, model=model_used, parsing_method="model")
+            return normalized
+        except Exception as e:
+            return {"error": f"Normalization failed: {e}", "_source": "ollama"}
     
     def parse_resume_with_fallback(self, resume_text: str, preferred_model: str = None) -> Dict[str, Any]:
         """

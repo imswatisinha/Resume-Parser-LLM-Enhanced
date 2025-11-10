@@ -1,7 +1,9 @@
 import streamlit as st
 import os
+from dotenv import load_dotenv
 from utils.pdf_parser import extract_text_from_pdf
 from utils.llm_parser import parse_resume_with_ollama, format_document_display, show_ollama_status, show_model_recommendations, get_available_ollama_models
+from utils.json_formatter import safe_json_dumps
 from utils.ollama_parser import integrate_ollama_parser, OllamaParser
 from utils.rag_retriever import create_ollama_rag_interface, display_ollama_resume_insights
 from utils.document_chunker import DocumentChunker
@@ -14,6 +16,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Load environment variables for API fallback keys
+try:
+    load_dotenv()
+except Exception:
+    pass
 
 # Custom CSS
 def load_css():
@@ -217,6 +225,8 @@ def main():
                         st.write(f"**Chunk {i+1}** ({chunk.get('type', 'text')})")
                         if 'page' in chunk:
                             st.caption(f"Page: {chunk['page']}")
+                        if chunk.get('summary'):
+                            st.caption(f"Summary: {chunk['summary'][:200]}" + ("..." if len(chunk['summary']) > 200 else ""))
                         st.text_area(
                             f"chunk_{i+1}",
                             value=chunk['content'][:500] + ("..." if len(chunk['content']) > 500 else ""),
@@ -251,13 +261,57 @@ def main():
                         disabled=True
                     )
             
-            # Download structured data
+            # Provider status and warnings
+            provider = st.session_state.parsed_data.get("provider") or st.session_state.parsed_data.get("ai_provider")
+            model_used = st.session_state.parsed_data.get("_model") or st.session_state.parsed_data.get("model")
+            if provider:
+                st.info(f"Parsed using: {provider} (model: {model_used})")
+            warnings = st.session_state.parsed_data.get("_warnings", [])
+            for w in warnings:
+                st.warning(w)
+
+            # Download structured data (full and per-section)
+            parsed_struct = st.session_state.parsed_data
+            full_json = safe_json_dumps(parsed_struct)
             st.download_button(
-                label="💾 Download Parsed Data (JSON)",
-                data=str(st.session_state.parsed_data),
-                file_name=f"parsed_resume_{uploaded_file.name.replace('.pdf', '.json')}",
-                mime="application/json"
+            	label="💾 Download Full JSON",
+            	data=full_json,
+            	file_name="parsed_full.json",
+            	mime="application/json"
             )
+
+            exp = parsed_struct.get("experience", [])
+            edu = parsed_struct.get("education", [])
+            skills = parsed_struct.get("skills", [])
+            chunks_list = parsed_struct.get("chunks", []) or st.session_state.get('chunks', [])
+            summary_text = parsed_struct.get("summary")
+
+            cols_dl = st.columns(3)
+            with cols_dl[0]:
+                if exp:
+                    st.download_button("📥 Experience JSON", safe_json_dumps({"experience": exp}), file_name="experience.json", mime="application/json")
+                else:
+                    st.button("📥 Experience JSON", disabled=True)
+                if edu:
+                    st.download_button("📥 Education JSON", safe_json_dumps({"education": edu}), file_name="education.json", mime="application/json")
+                else:
+                    st.button("📥 Education JSON", disabled=True)
+            with cols_dl[1]:
+                if skills:
+                    st.download_button("📥 Skills JSON", safe_json_dumps({"skills": skills}), file_name="skills.json", mime="application/json")
+                else:
+                    st.button("📥 Skills JSON", disabled=True)
+                if chunks_list:
+                    from utils.normalizers import validate_and_normalize
+                    norm = validate_and_normalize({}, chunks=chunks_list)
+                    st.download_button("📥 Chunks JSON", safe_json_dumps({"chunks": norm.get("chunks", [])}), file_name="chunks.json", mime="application/json")
+                else:
+                    st.button("📥 Chunks JSON", disabled=True)
+            with cols_dl[2]:
+                if summary_text:
+                    st.download_button("📥 Summary JSON", safe_json_dumps({"summary": summary_text}), file_name="summary.json", mime="application/json")
+                else:
+                    st.button("📥 Summary JSON", disabled=True)
             
             # Show Q&A section for document analysis
             qa_available = (

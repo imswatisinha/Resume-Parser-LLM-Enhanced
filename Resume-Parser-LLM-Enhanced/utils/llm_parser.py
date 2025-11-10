@@ -306,7 +306,10 @@ def _enhance_education_extraction(text: str, existing_education) -> list:
     found_institutions = set()
     for edu in enhanced_education:
         if edu.get('institution'):
-            found_institutions.add(edu['institution'].lower())
+            inst_val = edu.get('institution')
+            if not isinstance(inst_val, str):
+                inst_val = str(inst_val)
+            found_institutions.add(inst_val.lower())
     
     for pattern in education_patterns:
         matches = re.finditer(pattern, text)
@@ -329,15 +332,16 @@ def _enhance_education_extraction(text: str, existing_education) -> list:
                     institution = groups[2] if groups[2] else groups[1]
                     
             elif len(groups) >= 2:
-                if 'university' in groups[1].lower() or 'college' in groups[1].lower():
-                    institution = groups[1]
+                g1 = groups[1] if isinstance(groups[1], str) else str(groups[1])
+                if 'university' in g1.lower() or 'college' in g1.lower():
+                    institution = g1
                     degree = groups[0]
                 else:
                     institution = groups[0]
                     
             # Clean up extracted data
             if institution:
-                institution = re.sub(r'[(),\.]', '', institution).strip()
+                institution = re.sub(r'[(),\.]', '', str(institution)).strip()
                 if institution.lower() not in found_institutions and len(institution) > 3:
                     enhanced_education.append({
                         "degree": degree,
@@ -554,7 +558,9 @@ def _add_page_provenance(parsed_data: dict, pages: list) -> dict:
             if edu.get('raw_text') or edu.get('institution'):
                 search_text = edu.get('raw_text', edu.get('institution', ''))
                 for page_num, page_text in enumerate(pages, 1):
-                    if search_text.lower() in page_text.lower():
+                    stx = search_text if isinstance(search_text, str) else str(search_text)
+                    ptx = page_text if isinstance(page_text, str) else str(page_text)
+                    if stx.lower() in ptx.lower():
                         edu['page'] = page_num
                         break
     
@@ -564,7 +570,9 @@ def _add_page_provenance(parsed_data: dict, pages: list) -> dict:
             if exp.get('raw_text') or exp.get('company'):
                 search_text = exp.get('raw_text', exp.get('company', ''))
                 for page_num, page_text in enumerate(pages, 1):
-                    if search_text.lower() in page_text.lower():
+                    stx = search_text if isinstance(search_text, str) else str(search_text)
+                    ptx = page_text if isinstance(page_text, str) else str(page_text)
+                    if stx.lower() in ptx.lower():
                         exp['page'] = page_num
                         break
     
@@ -574,7 +582,9 @@ def _add_page_provenance(parsed_data: dict, pages: list) -> dict:
             if proj.get('raw_text') or proj.get('name'):
                 search_text = proj.get('raw_text', proj.get('name', ''))
                 for page_num, page_text in enumerate(pages, 1):
-                    if search_text.lower() in page_text.lower():
+                    stx = search_text if isinstance(search_text, str) else str(search_text)
+                    ptx = page_text if isinstance(page_text, str) else str(page_text)
+                    if stx.lower() in ptx.lower():
                         proj['page'] = page_num
                         break
     
@@ -956,16 +966,74 @@ def parse_resume_with_ollama(text, pages=None, model_name=None, use_expanders=Tr
                         st.write("**🔍 Error Details:**")
                         st.json(ollama_result["last_error"])
                 
-                return ollama_result
+                # Automatic fallback chain: OpenAI then Gemini
+                try:
+                    st.warning("⚠️ Ollama failed, switching to OpenAI...")
+                    from .llm_router import parse_with_fallback_min_schema
+                    from .normalizers import validate_and_normalize
+                    fb = parse_with_fallback_min_schema(text, model_name)
+                    if "error" not in fb:
+                        provider = fb.get("_provider", "openai")
+                        if provider == "openai":
+                            st.success("✅ Successfully parsed using OpenAI fallback")
+                        elif provider == "gemini":
+                            st.success("✅ Successfully parsed using Gemini fallback")
+                        maybe_chunks = None
+                        if isinstance(pages, list) and pages and isinstance(pages[0], dict) and 'content' in pages[0]:
+                            maybe_chunks = pages
+                        normalized = validate_and_normalize(
+                            fb,
+                            chunks=maybe_chunks,
+                            provider=provider,
+                            model=fb.get("_model", "-"),
+                            parsing_method="model",
+                            raw_text=text,
+                        )
+                        return normalized
+                    else:
+                        st.error(f"❌ Fallbacks failed: {fb.get('error')}")
+                        # Offline minimal structure
+                        from .normalizers import validate_and_normalize
+                        maybe_chunks = None
+                        if isinstance(pages, list) and pages and isinstance(pages[0], dict) and 'content' in pages[0]:
+                            maybe_chunks = pages
+                        offline = validate_and_normalize({}, chunks=maybe_chunks, provider="offline", model=None, parsing_method="offline_basic", raw_text=text)
+                        return offline
+                except Exception as e:
+                    st.error(f"❌ Fallbacks failed: {e}")
+                    from .normalizers import validate_and_normalize
+                    maybe_chunks = None
+                    if isinstance(pages, list) and pages and isinstance(pages[0], dict) and 'content' in pages[0]:
+                        maybe_chunks = pages
+                    offline = validate_and_normalize({}, chunks=maybe_chunks, provider="offline", model=None, parsing_method="offline_basic", raw_text=text)
+                    return offline
         
         st.success(f"✅ Successfully parsed with Ollama ({model_name})!")
         
         # Apply post-processing enhancements
         enhanced_result = post_process_parsed_data(ollama_result, text, pages)
-        enhanced_result["ai_provider"] = "ollama"
-        enhanced_result["model"] = model_name
         
-        return enhanced_result
+        # Normalize to standard schema and attach chunks
+        try:
+            from .normalizers import validate_and_normalize
+            # Build normalized chunks from provided 'pages' param if it is actually chunks
+            maybe_chunks = None
+            if isinstance(pages, list) and pages and isinstance(pages[0], dict) and 'content' in pages[0]:
+                maybe_chunks = pages
+            normalized = validate_and_normalize(
+                enhanced_result,
+                chunks=maybe_chunks,
+                provider="ollama",
+                model=model_name,
+                parsing_method="model",
+                raw_text=text,
+            )
+            return normalized
+        except Exception:
+            # Fallback minimal display
+            enhanced_result["ai_provider"] = "ollama"
+            enhanced_result["model"] = model_name
+            return enhanced_result
         
     except ImportError:
         st.error("❌ Ollama parser module not found")
@@ -997,9 +1065,9 @@ def format_document_display(parsed_data):
     enhanced = parsed_data.get("enhanced", False)
     enhancement_text = " + Enhanced" if enhanced else ""
     
-    # Get AI provider info
-    ai_provider = parsed_data.get("ai_provider", "unknown")
-    model = parsed_data.get("model", "unknown")
+    # Get AI provider info (fallback to normalized keys)
+    ai_provider = parsed_data.get("ai_provider") or parsed_data.get("provider", "unknown")
+    model = parsed_data.get("model") or parsed_data.get("_model", "unknown")
     
     provider_emojis = {
         "ollama": "🦙",
@@ -1032,12 +1100,18 @@ def format_document_display(parsed_data):
     with col1:
         if personal_info.get("email"):
             st.write(f"📧 **Email:** {personal_info['email']}")
-    with col2:
         if personal_info.get("phone"):
             st.write(f"📱 **Phone:** {personal_info['phone']}")
-    with col3:
+    with col2:
         if personal_info.get("location"):
             st.write(f"📍 **Location:** {personal_info['location']}")
+    with col3:
+        if personal_info.get("linkedin"):
+            st.write(f"🔗 **LinkedIn:** {personal_info['linkedin']}")
+        if personal_info.get("github"):
+            st.write(f"💻 **GitHub:** {personal_info['github']}")
+        if personal_info.get("portfolio"):
+            st.write(f"🌐 **Portfolio:** {personal_info['portfolio']}")
     
     # Professional Summary
     if parsed_data.get("summary"):
@@ -1078,10 +1152,20 @@ def format_document_display(parsed_data):
                     st.text(exp["raw_text"])
             st.write("---")
     
-    # Education
+    # Education (filter invalid rows for display)
     if parsed_data.get("education"):
         st.subheader("🎓 Education")
-        for edu in parsed_data["education"]:
+        def _edu_valid(name: str) -> bool:
+            if not name:
+                return False
+            n = str(name).lower()
+            if len(n) < 3:
+                return False
+            keyw = ("university", "college", "institute", "school", "academy")
+            return any(k in n for k in keyw)
+
+        edu_list = [e for e in parsed_data["education"] if _edu_valid(e.get('institution'))]
+        for edu in edu_list:
             page_info = f" (Page {edu['page']})" if edu.get('page') else ""
             st.write(f"**{edu.get('degree', 'N/A')}**{page_info}")
             
@@ -1096,18 +1180,24 @@ def format_document_display(parsed_data):
             if edu.get("location"):
                 st.write(f"📍 **Location:** {edu['location']}")
             if edu.get("gpa"):
-                st.write(f"📊 **GPA:** {edu['gpa']}")
+                gpa_val = edu['gpa']
+                # Show as GPA or Percentage based on value
+                if "%" in str(gpa_val) or (isinstance(gpa_val, str) and "percent" in gpa_val.lower()):
+                    st.write(f"📊 **Percentage:** {gpa_val}")
+                else:
+                    st.write(f"📊 **GPA:** {gpa_val}")
             
             if edu.get("raw_text"):
                 with st.expander("📝 Raw text"):
                     st.text(edu["raw_text"])
             st.write("---")
     
-    # Skills (New Structured Format)
-    if parsed_data.get("skills"):
+    # Skills (Structured or build categories from flat lists)
+    if parsed_data.get("skills") or parsed_data.get("technologies"):
         st.subheader("🛠️ Skills")
-        skills = parsed_data["skills"]
-        
+        skills = parsed_data.get("skills", [])
+        techs = parsed_data.get("technologies", [])
+
         if isinstance(skills, dict):
             # Display structured skills
             skill_categories = {
@@ -1132,8 +1222,64 @@ def format_document_display(parsed_data):
                         st.write("")
                     col_idx += 1
         else:
-            # Fallback for old format
-            st.write(", ".join(skills) if isinstance(skills, list) else str(skills))
+            # Build categorized view from flat lists
+            def _cat(name):
+                return name.lower()
+            langs = []
+            markup = []
+            frameworks = []
+            database = []
+            tools = []
+            others = []
+            # Combine all skills and techs
+            from_list = (skills if isinstance(skills, list) else []) + (techs if isinstance(techs, list) else [])
+            # Deduplicate while preserving order
+            seen = set()
+            deduped = []
+            for s in from_list:
+                if not s:
+                    continue
+                sl = str(s).lower().strip()
+                if sl and sl not in seen:
+                    seen.add(sl)
+                    deduped.append(str(s).strip())
+            
+            for s in deduped:
+                sl = s.lower()
+                if sl in {"javascript","typescript","python","c++","java","c","sql"}:
+                    langs.append(s)
+                elif sl in {"html","css","tailwind css","bootstrap"}:
+                    markup.append(s)
+                elif sl in {"react","react.js","next.js","node","node.js","express","express.js"}:
+                    frameworks.append(s)
+                elif sl in {"mongodb","mysql","postgresql","appwrite","sql"}:
+                    database.append(s)
+                elif sl in {"git","postman","vs code","vscode","spline","docker"}:
+                    tools.append(s)
+                else:
+                    others.append(s)
+
+            cols = st.columns(2)
+            with cols[0]:
+                if langs:
+                    st.write("**🐍 Programming Languages:**")
+                    st.write(", ".join(sorted(set(langs), key=lambda x: str(x).lower())))
+                if markup:
+                    st.write("**🎨 Markup & Styling:**")
+                    st.write(", ".join(sorted(set(markup), key=lambda x: str(x).lower())))
+                if frameworks:
+                    st.write("**🧩 Frameworks & Libraries:**")
+                    st.write(", ".join(sorted(set(frameworks), key=lambda x: str(x).lower())))
+            with cols[1]:
+                if database:
+                    st.write("**🗄️ Database:**")
+                    st.write(", ".join(sorted(set(database), key=lambda x: str(x).lower())))
+                if tools:
+                    st.write("**🔧 Tools:**")
+                    st.write(", ".join(sorted(set(tools), key=lambda x: str(x).lower())))
+                if others:
+                    st.write("**📦 Others:**")
+                    st.write(", ".join(sorted(set(others), key=lambda x: str(x).lower())))
     
     # Projects
     if parsed_data.get("projects"):
